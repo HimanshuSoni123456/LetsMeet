@@ -120,9 +120,9 @@ export default function VideoMeetComponent() {
                     localVideoref.current.srcObject = stream;
                 }
 
+                // Replace tracks on all existing connections
                 for (let id in connections) {
                     if (id === socketIdRef.current) continue;
-                    // replaceTracks is the correct way to switch streams
                     stream.getTracks().forEach(track => {
                         connections[id].getSenders().forEach(sender => {
                             if (sender.track && sender.track.kind === track.kind) {
@@ -185,7 +185,7 @@ export default function VideoMeetComponent() {
     };
 
     const gotMessageFromServer = (fromId, message) => {
-        var signal = JSON.parse(message)
+        var signal = JSON.parse(message);
 
         if (fromId !== socketIdRef.current) {
             if (signal.sdp) {
@@ -193,7 +193,7 @@ export default function VideoMeetComponent() {
                     if (signal.sdp.type === 'offer') {
                         connections[fromId].createAnswer().then((description) => {
                             connections[fromId].setLocalDescription(description).then(() => {
-                                socketRef.current.emit('signal', fromId, JSON.stringify({ 'sdp': connections[fromId].localDescription }))
+                                socketRef.current.emit('signal', fromId, JSON.stringify({ 'sdp': connections[fromId].localDescription }));
                             }).catch(e => console.error(e));
                         }).catch(e => console.error(e));
                     }
@@ -222,53 +222,83 @@ export default function VideoMeetComponent() {
                 }
             });
 
-            socketRef.current.on('user-joined', (id, clients) => {
-                clients.forEach((socketListId) => {
-                    const peerConnection = new RTCPeerConnection(peerConfigConnections);
-                    connections[socketListId] = peerConnection;
+            socketRef.current.on('user-joined', (newUserId, clients) => {
+                // Handle new user joining by establishing connections with all existing peers
+                clients.forEach((existingPeerId) => {
+                    if (existingPeerId === newUserId) {
+                        return; // Skip connecting to self
+                    }
+                    if (!connections[existingPeerId]) {
+                        const peerConnection = new RTCPeerConnection(peerConfigConnections);
+                        connections[existingPeerId] = peerConnection;
 
-                    // This is the new, correct way to handle incoming video streams
-                    peerConnection.ontrack = (event) => {
-                        setVideos(prevVideos => {
-                            const existingVideo = prevVideos.find(v => v.socketId === socketListId);
-                            if (existingVideo) {
-                                return prevVideos.map(v =>
-                                    v.socketId === socketListId ? { ...v, stream: event.streams[0] } : v
-                                );
-                            } else {
-                                return [...prevVideos, {
-                                    socketId: socketListId,
-                                    stream: event.streams[0],
-                                }];
+                        // Event listener for when the remote peer adds a new track (video/audio)
+                        peerConnection.ontrack = (event) => {
+                            setVideos(prevVideos => {
+                                const existingVideo = prevVideos.find(v => v.socketId === existingPeerId);
+                                if (existingVideo) {
+                                    return prevVideos.map(v =>
+                                        v.socketId === existingPeerId ? { ...v, stream: event.streams[0] } : v
+                                    );
+                                } else {
+                                    return [...prevVideos, {
+                                        socketId: existingPeerId,
+                                        stream: event.streams[0],
+                                    }];
+                                }
+                            });
+                        };
+
+                        // Event listener for receiving the data channel from the remote peer
+                        peerConnection.ondatachannel = (event) => {
+                            const dataChannel = event.channel;
+                            dataChannel.onmessage = (event) => {
+                                try {
+                                    const messageData = JSON.parse(event.data);
+                                    addMessage(messageData.data, messageData.sender, existingPeerId);
+                                } catch (e) {
+                                    console.error("Failed to parse chat message:", e);
+                                }
+                            };
+                            peerConnection.dataChannel = dataChannel;
+                        };
+
+                        peerConnection.onicecandidate = function (event) {
+                            if (event.candidate != null) {
+                                socketRef.current.emit('signal', existingPeerId, JSON.stringify({ 'ice': event.candidate }));
                             }
-                        });
-                    };
-
-                    // WebRTC Data Channel for chat
-                    const dataChannel = peerConnection.createDataChannel("chat");
-                    dataChannel.onmessage = (event) => {
-                        const messageData = JSON.parse(event.data);
-                        addMessage(messageData.data, messageData.sender, socketListId);
-                    };
-                    peerConnection.dataChannel = dataChannel;
-
-
-                    peerConnection.onicecandidate = function (event) {
-                        if (event.candidate != null) {
-                            socketRef.current.emit('signal', socketListId, JSON.stringify({ 'ice': event.candidate }));
+                        };
+                        
+                        // Add local tracks to the new connection
+                        if (window.localStream) {
+                            window.localStream.getTracks().forEach(track => {
+                                peerConnection.addTrack(track, window.localStream);
+                            });
                         }
-                    };
-
-                    if (window.localStream) {
-                        window.localStream.getTracks().forEach(track => {
-                            peerConnection.addTrack(track, window.localStream);
-                        });
                     }
 
-                    if (id !== socketIdRef.current) {
+                    // For the new user (newUserId), create an offer to send to all existing peers
+                    if (newUserId === socketIdRef.current) {
+                        const peerConnection = connections[existingPeerId];
+                        
+                        // Create and manage the data channel
+                        const dataChannel = peerConnection.createDataChannel("chat");
+                        dataChannel.onopen = () => {
+                            console.log("Data channel opened for peer:", existingPeerId);
+                        };
+                        dataChannel.onmessage = (event) => {
+                            try {
+                                const messageData = JSON.parse(event.data);
+                                addMessage(messageData.data, messageData.sender, existingPeerId);
+                            } catch (e) {
+                                console.error("Failed to parse chat message:", e);
+                            }
+                        };
+                        peerConnection.dataChannel = dataChannel;
+                        
                         peerConnection.createOffer().then((description) => {
                             peerConnection.setLocalDescription(description).then(() => {
-                                socketRef.current.emit('signal', socketListId, JSON.stringify({ 'sdp': peerConnection.localDescription }));
+                                socketRef.current.emit('signal', existingPeerId, JSON.stringify({ 'sdp': peerConnection.localDescription }));
                             }).catch(e => console.error(e));
                         }).catch(e => console.error(e));
                     }
@@ -317,14 +347,17 @@ export default function VideoMeetComponent() {
             data: message
         });
 
+        addMessage(message, username, socketIdRef.current);
+        setMessage("");
+        
         for (const id in connections) {
             const dataChannel = connections[id].dataChannel;
             if (dataChannel && dataChannel.readyState === 'open') {
                 dataChannel.send(chatMessage);
+            } else {
+                console.warn("Data channel not open for peer:", id);
             }
         }
-        addMessage(message, username, socketIdRef.current);
-        setMessage("");
     };
 
     let connect = () => {
