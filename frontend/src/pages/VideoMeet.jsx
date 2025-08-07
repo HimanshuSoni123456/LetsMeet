@@ -73,7 +73,7 @@ export default function VideoMeetComponent() {
             getDislayMedia();
         } else {
             if (window.localStream && window.localStream.getVideoTracks().some(track => track.label.includes('screen'))) {
-                 try {
+                try {
                     window.localStream.getTracks().forEach(track => track.stop());
                 } catch (e) { console.error(e); }
                 getUserMedia();
@@ -120,7 +120,6 @@ export default function VideoMeetComponent() {
                     localVideoref.current.srcObject = stream;
                 }
 
-                // Replace tracks on all existing connections
                 for (let id in connections) {
                     if (id === socketIdRef.current) continue;
                     stream.getTracks().forEach(track => {
@@ -223,26 +222,22 @@ export default function VideoMeetComponent() {
             });
 
             socketRef.current.on('user-joined', (newUserId, clients) => {
-                // Handle new user joining by establishing connections with all existing peers
-                clients.forEach((existingPeerId) => {
-                    if (existingPeerId === newUserId) {
-                        return; // Skip connecting to self
-                    }
-                    if (!connections[existingPeerId]) {
+                clients.forEach((peerId) => {
+                    if (peerId !== socketIdRef.current) {
                         const peerConnection = new RTCPeerConnection(peerConfigConnections);
-                        connections[existingPeerId] = peerConnection;
+                        connections[peerId] = peerConnection;
 
                         // Event listener for when the remote peer adds a new track (video/audio)
                         peerConnection.ontrack = (event) => {
                             setVideos(prevVideos => {
-                                const existingVideo = prevVideos.find(v => v.socketId === existingPeerId);
+                                const existingVideo = prevVideos.find(v => v.socketId === peerId);
                                 if (existingVideo) {
                                     return prevVideos.map(v =>
-                                        v.socketId === existingPeerId ? { ...v, stream: event.streams[0] } : v
+                                        v.socketId === peerId ? { ...v, stream: event.streams[0] } : v
                                     );
                                 } else {
                                     return [...prevVideos, {
-                                        socketId: existingPeerId,
+                                        socketId: peerId,
                                         stream: event.streams[0],
                                     }];
                                 }
@@ -255,7 +250,7 @@ export default function VideoMeetComponent() {
                             dataChannel.onmessage = (event) => {
                                 try {
                                     const messageData = JSON.parse(event.data);
-                                    addMessage(messageData.data, messageData.sender, existingPeerId);
+                                    addMessage(messageData.data, messageData.sender, peerId);
                                 } catch (e) {
                                     console.error("Failed to parse chat message:", e);
                                 }
@@ -265,7 +260,7 @@ export default function VideoMeetComponent() {
 
                         peerConnection.onicecandidate = function (event) {
                             if (event.candidate != null) {
-                                socketRef.current.emit('signal', existingPeerId, JSON.stringify({ 'ice': event.candidate }));
+                                socketRef.current.emit('signal', peerId, JSON.stringify({ 'ice': event.candidate }));
                             }
                         };
                         
@@ -275,34 +270,75 @@ export default function VideoMeetComponent() {
                                 peerConnection.addTrack(track, window.localStream);
                             });
                         }
-                    }
 
-                    // For the new user (newUserId), create an offer to send to all existing peers
-                    if (newUserId === socketIdRef.current) {
-                        const peerConnection = connections[existingPeerId];
-                        
-                        // Create and manage the data channel
-                        const dataChannel = peerConnection.createDataChannel("chat");
-                        dataChannel.onopen = () => {
-                            console.log("Data channel opened for peer:", existingPeerId);
-                        };
-                        dataChannel.onmessage = (event) => {
-                            try {
-                                const messageData = JSON.parse(event.data);
-                                addMessage(messageData.data, messageData.sender, existingPeerId);
-                            } catch (e) {
-                                console.error("Failed to parse chat message:", e);
-                            }
-                        };
-                        peerConnection.dataChannel = dataChannel;
-                        
-                        peerConnection.createOffer().then((description) => {
-                            peerConnection.setLocalDescription(description).then(() => {
-                                socketRef.current.emit('signal', existingPeerId, JSON.stringify({ 'sdp': peerConnection.localDescription }));
+                        // For the new user joining, all existing peers need to create an offer
+                        if (newUserId === peerId) {
+                            peerConnection.createOffer().then((description) => {
+                                peerConnection.setLocalDescription(description).then(() => {
+                                    socketRef.current.emit('signal', peerId, JSON.stringify({ 'sdp': peerConnection.localDescription }));
+                                }).catch(e => console.error(e));
                             }).catch(e => console.error(e));
-                        }).catch(e => console.error(e));
+                        }
                     }
                 });
+
+                // Create connections for the new user
+                if (newUserId === socketIdRef.current) {
+                    clients.forEach(existingPeerId => {
+                        if (existingPeerId !== newUserId) {
+                            const peerConnection = new RTCPeerConnection(peerConfigConnections);
+                            connections[existingPeerId] = peerConnection;
+
+                            peerConnection.ontrack = (event) => {
+                                setVideos(prevVideos => {
+                                    const existingVideo = prevVideos.find(v => v.socketId === existingPeerId);
+                                    if (existingVideo) {
+                                        return prevVideos.map(v =>
+                                            v.socketId === existingPeerId ? { ...v, stream: event.streams[0] } : v
+                                        );
+                                    } else {
+                                        return [...prevVideos, {
+                                            socketId: existingPeerId,
+                                            stream: event.streams[0],
+                                        }];
+                                    }
+                                });
+                            };
+
+                            const dataChannel = peerConnection.createDataChannel("chat");
+                            dataChannel.onopen = () => {
+                                console.log("Data channel opened for peer:", existingPeerId);
+                            };
+                            dataChannel.onmessage = (event) => {
+                                try {
+                                    const messageData = JSON.parse(event.data);
+                                    addMessage(messageData.data, messageData.sender, existingPeerId);
+                                } catch (e) {
+                                    console.error("Failed to parse chat message:", e);
+                                }
+                            };
+                            peerConnection.dataChannel = dataChannel;
+
+                            peerConnection.onicecandidate = function (event) {
+                                if (event.candidate != null) {
+                                    socketRef.current.emit('signal', existingPeerId, JSON.stringify({ 'ice': event.candidate }));
+                                }
+                            };
+
+                            if (window.localStream) {
+                                window.localStream.getTracks().forEach(track => {
+                                    peerConnection.addTrack(track, window.localStream);
+                                });
+                            }
+
+                            peerConnection.createOffer().then((description) => {
+                                peerConnection.setLocalDescription(description).then(() => {
+                                    socketRef.current.emit('signal', existingPeerId, JSON.stringify({ 'sdp': peerConnection.localDescription }));
+                                }).catch(e => console.error(e));
+                            }).catch(e => console.error(e));
+                        }
+                    });
+                }
             });
         });
     };
@@ -482,4 +518,3 @@ export default function VideoMeetComponent() {
         </div>
     );
 }
-
