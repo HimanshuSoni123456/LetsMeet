@@ -55,7 +55,7 @@
 
 .conferenceView video {
     width: 40vw;
-    height: 20vh;
+    height: 40vh;
     min-width: 30vw;
     border-radius: 10px;
     object-fit: cover;
