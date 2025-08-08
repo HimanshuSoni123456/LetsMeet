@@ -1,5 +1,4 @@
 /* videoComponent.module.css */
-
 .meetVideoContainer {
     position: relative;
     height: 100vh;
@@ -43,7 +42,7 @@
     font-size: 3rem;
 }
 
-.conferenceView { 
+.conferenceView {
     display: flex;
     justify-content: center;
     flex-wrap: wrap;
